@@ -14,7 +14,6 @@ class HttpClient:
     def get(self, relative_url, **params):
         url = self.base_url + relative_url
         resp = requests.get(url, timeout=10, **params)
-
         if not resp.ok:
             self._raise_error(resp.status_code, resp.text)
 

@@ -1,5 +1,6 @@
 import time
 import itertools
+import pandas as pd
 from datetime import datetime, date, timedelta
 
 
@@ -111,16 +112,14 @@ class DataClient:
         prices = []
         while True:
             try:
-                resq = list(
-                    self.td.time_series(
-                        symbol=meta["symbol"],
-                        interval="1day",
-                        exchange=meta["exchange"],
-                        start_date=start_d.strftime("%Y-%m-%d"),
-                        outputsize=5000,
-                        order="asc",
-                    ).as_json()
-                )
+                resq = self.td.time_series(
+                    symbol=meta["symbol"],
+                    interval="1day",
+                    exchange=meta["exchange"],
+                    start_date=start_d.strftime("%Y-%m-%d"),
+                    outputsize=5000,
+                    order="asc",
+                ).as_json()
             except Exception as e:
                 if "No data is available" in str(e):
                     break
@@ -128,9 +127,10 @@ class DataClient:
                     time.sleep(30)
                     continue
 
-            if 0 < len(resq) or len(resq) == 5000:
+            if 0 < len(resq):
                 prices.extend(resq)
-            else:
+
+            if len(resq) < 5000:
                 break
             start_d = resq[-1]["d"] + timedelta(1)
 
@@ -144,51 +144,51 @@ class DataClient:
         inserts = self.db.prices.insert_many(prices)
         print(f'{meta["symbol"]} price {len(inserts.inserted_ids)} documents updated.')
 
-    def full_update_hr(self):
-        symbols = self.db.symbols.find()
-        for meta in symbols:
-            while not self.check_usage():
-                time.sleep(30)
-            self.update_hr(meta)
-
-    def update_hr(self, meta):
-        if meta["update_date"] is None:
-            start_d = self.get_start_date(meta["symbol"], "1h")
+    def update_hr(self, meta, start_date=None):
+        if start_date is not None:
+            start_d = start_date
         else:
-            start_d = meta["update_date"] + timedelta(minutes=1)
+            if meta["update_date"] is None:
+                start_d = self.get_start_date(meta["symbol"], "1h")
+            elif meta["update_date"] + timedelta(hours=1) > datetime.now():
+                return
+            else:
+                start_d = meta["update_date"] + timedelta(minutes=1)
+
         prices = []
         while True:
             try:
-                resq = list(
-                    self.td.time_series(
-                        symbol=meta["symbol"],
-                        interval="1h",
-                        exchange=meta["exchange"],
-                        start_date=start_d.strftime("%Y-%m-%d %H:%M:%S"),
-                        outputsize=5000,
-                        order="asc",
-                    ).as_json()
-                )
+                resq = self.td.time_series(
+                    symbol=meta["symbol"],
+                    interval="1h",
+                    exchange=meta["exchange"],
+                    start_date=start_d.strftime("%Y-%m-%d %H:%M:%S"),
+                    outputsize=5000,
+                    order="asc",
+                ).as_json()
+
             except Exception as e:
                 if "No data is available" in str(e):
                     break
                 elif "You have reached the API calls limit." in str(e):
-                    time.sleep(30)
+                    time.sleep(60)
                     continue
 
-            if 0 < len(resq) or len(resq) == 5000:
+            if 0 < len(resq):
                 prices.extend(resq)
-            else:
+
+            if len(resq) < 5000:
                 break
-            start_d = resq[-1]["d"] + timedelta(1)
+            start_d = resq[-1]["d"]
 
         if len(prices) == 0:
             return
+
         upd_date = prices[-1]["d"]
         func = lambda x: x["d"].toordinal()
         for key, group in itertools.groupby(prices, func):
             tdate = datetime.fromordinal(key)
-            record = self.db.prices.find_one({"symbol": meta["_id"], "d": tdate})
+            record = self.db.prices.find_one({"symbol_id": meta["_id"], "d": tdate})
             p = {} if record is None else record["p"]
             for ob in group:
                 mins = str(int((ob["d"] - tdate).total_seconds() / 60))
@@ -206,7 +206,7 @@ class DataClient:
                 "o": temp[0]["o"],
                 "h": max([x["h"] for x in temp]),
                 "l": min([x["l"] for x in temp]),
-                "c": temp[-1]["o"],
+                "c": temp[-1]["c"],
                 "v": sum([x["v"] for x in temp]),
                 "symbol_id": meta["_id"],
                 "p": p,
@@ -214,6 +214,6 @@ class DataClient:
             if record is None:
                 self.db.prices.insert(new_record)
             else:
-                self.db.prices.replace_one({"_id": record["_id"]}, {"$set": new_record})
+                self.db.prices.replace_one({"_id": record["_id"]}, new_record)
         self.db.symbols.update_one({"_id": meta["_id"]}, {"$set": {"update_date": upd_date}})
-        print(f'{meta["symbol"]} prices documents updated.[{upd_date}]')
+        return f'{meta["symbol"]} prices documents updated.[{upd_date}]'
